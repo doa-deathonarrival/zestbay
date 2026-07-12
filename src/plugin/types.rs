@@ -1,7 +1,7 @@
 //! Format-agnostic plugin types used across LV2, CLAP, and VST3 backends.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -399,6 +399,8 @@ pub type SharedPortUpdates = Arc<PortUpdates>;
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::PI;
+
     use super::*;
 
     // ---- AtomicF32 ----
@@ -407,9 +409,8 @@ mod tests {
     fn atomic_f32_store_load() {
         let a = AtomicF32::new(0.0);
         assert!((a.load() - 0.0).abs() < f32::EPSILON);
-
-        a.store(3.14);
-        assert!((a.load() - 3.14).abs() < 1e-5);
+        a.store(PI);
+        assert!((a.load() - PI).abs() < 1e-5);
     }
 
     #[test]
@@ -477,12 +478,19 @@ mod tests {
     fn port_updates_snapshot_all() {
         let pu = PortUpdates {
             control_inputs: vec![
-                PortSlot { port_index: 0, value: AtomicF32::new(0.1) },
-                PortSlot { port_index: 1, value: AtomicF32::new(0.2) },
+                PortSlot {
+                    port_index: 0,
+                    value: AtomicF32::new(0.1),
+                },
+                PortSlot {
+                    port_index: 1,
+                    value: AtomicF32::new(0.2),
+                },
             ],
-            control_outputs: vec![
-                PortSlot { port_index: 2, value: AtomicF32::new(0.3) },
-            ],
+            control_outputs: vec![PortSlot {
+                port_index: 2,
+                value: AtomicF32::new(0.3),
+            }],
             atom_outputs: Vec::new(),
             atom_inputs: Vec::new(),
         };
@@ -539,22 +547,70 @@ mod tests {
 
     #[test]
     fn category_from_class_label() {
-        assert_eq!(PluginCategory::from_class_label("Amplifier"), PluginCategory::Amplifier);
-        assert_eq!(PluginCategory::from_class_label("Analyser"), PluginCategory::Analyser);
-        assert_eq!(PluginCategory::from_class_label("Analyzer"), PluginCategory::Analyser);
-        assert_eq!(PluginCategory::from_class_label("Chorus"), PluginCategory::Chorus);
-        assert_eq!(PluginCategory::from_class_label("Compressor"), PluginCategory::Compressor);
-        assert_eq!(PluginCategory::from_class_label("Delay"), PluginCategory::Delay);
-        assert_eq!(PluginCategory::from_class_label("Distortion"), PluginCategory::Distortion);
-        assert_eq!(PluginCategory::from_class_label("Dynamics"), PluginCategory::Dynamics);
-        assert_eq!(PluginCategory::from_class_label("Equaliser"), PluginCategory::Equaliser);
-        assert_eq!(PluginCategory::from_class_label("Equalizer"), PluginCategory::Equaliser);
-        assert_eq!(PluginCategory::from_class_label("EQ Plugin"), PluginCategory::Equaliser);
-        assert_eq!(PluginCategory::from_class_label("Filter"), PluginCategory::Filter);
-        assert_eq!(PluginCategory::from_class_label("Instrument"), PluginCategory::Instrument);
-        assert_eq!(PluginCategory::from_class_label("Reverb"), PluginCategory::Reverb);
-        assert_eq!(PluginCategory::from_class_label("Spatial"), PluginCategory::Spatial);
-        assert_eq!(PluginCategory::from_class_label("Utility"), PluginCategory::Utility);
+        assert_eq!(
+            PluginCategory::from_class_label("Amplifier"),
+            PluginCategory::Amplifier
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Analyser"),
+            PluginCategory::Analyser
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Analyzer"),
+            PluginCategory::Analyser
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Chorus"),
+            PluginCategory::Chorus
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Compressor"),
+            PluginCategory::Compressor
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Delay"),
+            PluginCategory::Delay
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Distortion"),
+            PluginCategory::Distortion
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Dynamics"),
+            PluginCategory::Dynamics
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Equaliser"),
+            PluginCategory::Equaliser
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Equalizer"),
+            PluginCategory::Equaliser
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("EQ Plugin"),
+            PluginCategory::Equaliser
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Filter"),
+            PluginCategory::Filter
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Instrument"),
+            PluginCategory::Instrument
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Reverb"),
+            PluginCategory::Reverb
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Spatial"),
+            PluginCategory::Spatial
+        );
+        assert_eq!(
+            PluginCategory::from_class_label("Utility"),
+            PluginCategory::Utility
+        );
     }
 
     #[test]
@@ -567,7 +623,10 @@ mod tests {
     fn category_display_name() {
         assert_eq!(PluginCategory::Reverb.display_name(), "Reverb");
         assert_eq!(PluginCategory::Instrument.display_name(), "Instrument");
-        assert_eq!(PluginCategory::Other("Custom".to_string()).display_name(), "Custom");
+        assert_eq!(
+            PluginCategory::Other("Custom".to_string()).display_name(),
+            "Custom"
+        );
     }
 
     // ---- PluginInfo helpers ----
@@ -575,11 +634,19 @@ mod tests {
     #[test]
     fn plugin_info_is_effect() {
         let info = PluginInfo {
-            uri: String::new(), name: String::new(), format: PluginFormat::Vst3,
-            category: PluginCategory::Reverb, author: None, ports: Vec::new(),
-            audio_inputs: 2, audio_outputs: 2,
-            control_inputs: 0, control_outputs: 0,
-            required_features: Vec::new(), compatible: true, has_ui: false,
+            uri: String::new(),
+            name: String::new(),
+            format: PluginFormat::Vst3,
+            category: PluginCategory::Reverb,
+            author: None,
+            ports: Vec::new(),
+            audio_inputs: 2,
+            audio_outputs: 2,
+            control_inputs: 0,
+            control_outputs: 0,
+            required_features: Vec::new(),
+            compatible: true,
+            has_ui: false,
             library_path: String::new(),
         };
         assert!(info.is_effect());
@@ -590,11 +657,19 @@ mod tests {
     #[test]
     fn plugin_info_is_instrument() {
         let info = PluginInfo {
-            uri: String::new(), name: String::new(), format: PluginFormat::Vst3,
-            category: PluginCategory::Instrument, author: None, ports: Vec::new(),
-            audio_inputs: 0, audio_outputs: 2,
-            control_inputs: 0, control_outputs: 0,
-            required_features: Vec::new(), compatible: true, has_ui: false,
+            uri: String::new(),
+            name: String::new(),
+            format: PluginFormat::Vst3,
+            category: PluginCategory::Instrument,
+            author: None,
+            ports: Vec::new(),
+            audio_inputs: 0,
+            audio_outputs: 2,
+            control_inputs: 0,
+            control_outputs: 0,
+            required_features: Vec::new(),
+            compatible: true,
+            has_ui: false,
             library_path: String::new(),
         };
         assert!(info.is_instrument());
@@ -605,11 +680,19 @@ mod tests {
     #[test]
     fn plugin_info_is_analyser() {
         let info = PluginInfo {
-            uri: String::new(), name: String::new(), format: PluginFormat::Vst3,
-            category: PluginCategory::Analyser, author: None, ports: Vec::new(),
-            audio_inputs: 2, audio_outputs: 0,
-            control_inputs: 0, control_outputs: 0,
-            required_features: Vec::new(), compatible: true, has_ui: false,
+            uri: String::new(),
+            name: String::new(),
+            format: PluginFormat::Vst3,
+            category: PluginCategory::Analyser,
+            author: None,
+            ports: Vec::new(),
+            audio_inputs: 2,
+            audio_outputs: 0,
+            control_inputs: 0,
+            control_outputs: 0,
+            required_features: Vec::new(),
+            compatible: true,
+            has_ui: false,
             library_path: String::new(),
         };
         assert!(info.is_analyser());
@@ -621,7 +704,8 @@ mod tests {
 
     #[test]
     fn saved_plugin_instance_default_format_is_lv2() {
-        let json = r#"{"plugin_uri":"test","display_name":"Test","bypassed":false,"parameters":[]}"#;
+        let json =
+            r#"{"plugin_uri":"test","display_name":"Test","bypassed":false,"parameters":[]}"#;
         let saved: SavedPluginInstance = serde_json::from_str(json).unwrap();
         assert_eq!(saved.format, "LV2");
     }

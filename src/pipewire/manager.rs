@@ -56,9 +56,14 @@ pub fn start(
     let cooldown = operation_cooldown_ms.max(1);
 
     std::thread::spawn(move || {
-        if let Err(e) =
-            run_pipewire_thread(graph, event_tx.clone(), cmd_rx, cmd_tx_for_pw, tick, cooldown)
-        {
+        if let Err(e) = run_pipewire_thread(
+            graph,
+            event_tx.clone(),
+            cmd_rx,
+            cmd_tx_for_pw,
+            tick,
+            cooldown,
+        ) {
             log::error!("PipeWire thread error: {}", e);
             let _ = event_tx.send(PwEvent::Error(e.to_string()));
         }
@@ -145,55 +150,53 @@ fn run_pipewire_thread(
                 let event_tx = event_tx.clone();
                 let changes_pending = changes_pending.clone();
 
-                move |global| {
-                    match global.type_ {
-                        ObjectType::Node => {
-                            if let Some(node) = parse_node(global) {
-                                if node.node_type == Some(NodeType::Plugin)
-                                    && let Some(props) = global.props.as_ref()
-                                    && let Some(id_str) = props.get("zestbay.plugin.instance_id")
-                                    && let Ok(instance_id) = id_str.parse::<u64>()
-                                {
-                                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginAdded {
-                                        instance_id,
-                                        pw_node_id: global.id,
-                                        display_name: node.display_name().to_string(),
-                                    }));
-                                }
-                                graph.insert_node(node.clone());
-                                let _ = event_tx.send(PwEvent::NodeChanged(node));
-                                *changes_pending.borrow_mut() = true;
+                move |global| match global.type_ {
+                    ObjectType::Node => {
+                        if let Some(node) = parse_node(global) {
+                            if node.node_type == Some(NodeType::Plugin)
+                                && let Some(props) = global.props.as_ref()
+                                && let Some(id_str) = props.get("zestbay.plugin.instance_id")
+                                && let Ok(instance_id) = id_str.parse::<u64>()
+                            {
+                                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginAdded {
+                                    instance_id,
+                                    pw_node_id: global.id,
+                                    display_name: node.display_name().to_string(),
+                                }));
                             }
+                            graph.insert_node(node.clone());
+                            let _ = event_tx.send(PwEvent::NodeChanged(node));
+                            *changes_pending.borrow_mut() = true;
                         }
-                        ObjectType::Port => {
-                            if let Some(port) = parse_port(global, &graph) {
-                                log::debug!(
-                                    "Port registered: id={} node={} name={:?} dir={:?}",
-                                    port.id,
-                                    port.node_id,
-                                    port.name,
-                                    port.direction
-                                );
-                                graph.insert_port(port.clone());
-                                let _ = event_tx.send(PwEvent::PortChanged(port));
-                                *changes_pending.borrow_mut() = true;
-                            } else {
-                                log::debug!(
-                                    "Port global {} could not be parsed (props: {:?})",
-                                    global.id,
-                                    global.props.as_ref().map(|p| props_to_debug(p))
-                                );
-                            }
-                        }
-                        ObjectType::Link => {
-                            if let Some(link) = parse_link_from_props(global) {
-                                graph.insert_link(link.clone());
-                                let _ = event_tx.send(PwEvent::LinkChanged(link));
-                                *changes_pending.borrow_mut() = true;
-                            }
-                        }
-                        _ => {}
                     }
+                    ObjectType::Port => {
+                        if let Some(port) = parse_port(global, &graph) {
+                            log::debug!(
+                                "Port registered: id={} node={} name={:?} dir={:?}",
+                                port.id,
+                                port.node_id,
+                                port.name,
+                                port.direction
+                            );
+                            graph.insert_port(port.clone());
+                            let _ = event_tx.send(PwEvent::PortChanged(port));
+                            *changes_pending.borrow_mut() = true;
+                        } else {
+                            log::debug!(
+                                "Port global {} could not be parsed (props: {:?})",
+                                global.id,
+                                global.props.as_ref().map(|p| props_to_debug(p))
+                            );
+                        }
+                    }
+                    ObjectType::Link => {
+                        if let Some(link) = parse_link_from_props(global) {
+                            graph.insert_link(link.clone());
+                            let _ = event_tx.send(PwEvent::LinkChanged(link));
+                            *changes_pending.borrow_mut() = true;
+                        }
+                    }
+                    _ => {}
                 }
             })
             .global_remove({
@@ -211,11 +214,11 @@ fn run_pipewire_thread(
                             let device_name = node.display_name().to_string();
                             log::info!(
                                 "MIDI device removed: {} (node {}), cleaning up mappings",
-                                device_name, id,
-                            );
-                            let _ = pw_cmd_tx.send(PwCommand::RemoveMidiMappingsForDevice {
                                 device_name,
-                            });
+                                id,
+                            );
+                            let _ = pw_cmd_tx
+                                .send(PwCommand::RemoveMidiMappingsForDevice { device_name });
                         }
                         let removed_link_ids = graph.cleanup_node(id);
                         // Destroy lingering PipeWire link objects and emit
@@ -289,119 +292,102 @@ fn run_pipewire_thread(
         let midi_mapping_table = midi_mapping_table.clone();
         let midi_learn_state = midi_learn_state.clone();
 
-        move |cmd| {
-            match cmd {
-                PwCommand::SetPluginParameter {
-                    instance_id,
-                    port_index,
-                    value,
-                } => {
-                    if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
-                        instance.borrow_mut().set_parameter(port_index, value);
-                        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
-                            instance_id,
-                            port_index,
-                            value,
-                        }));
-                    } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
-                        instance.borrow_mut().set_parameter(port_index, value);
-                        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
-                            instance_id,
-                            port_index,
-                            value,
-                        }));
-                    } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
-                        instance.borrow_mut().set_parameter(port_index, value);
-                        let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
-                            instance_id,
-                            port_index,
-                            value,
-                        }));
-                    }
-                }
-                PwCommand::SetPluginBypass {
-                    instance_id,
-                    bypassed,
-                } => {
-                    if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
-                        instance.borrow_mut().bypassed = bypassed;
-                    } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
-                        instance.borrow_mut().bypassed = bypassed;
-                    } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
-                        instance.borrow_mut().bypassed = bypassed;
-                    }
-                }
-                PwCommand::StartMidiLearn {
-                    instance_id,
-                    port_index,
-                    label,
-                    mode,
-                } => {
-                    *midi_learn_state.borrow_mut() = Some(crate::midi::MidiLearnState {
-                        target: crate::midi::MidiCcTarget {
-                            instance_id,
-                            port_index,
-                        },
-                        label,
-                        mode,
-                    });
-                    if let Some(filter) = lv2_filters.borrow().get(&instance_id) {
-                        filter.set_learn_mode(true);
-                    } else if let Some(filter) = clap_filters.borrow().get(&instance_id) {
-                        filter.set_learn_mode(true);
-                    } else if let Some(filter) = vst3_filters.borrow().get(&instance_id) {
-                        filter.set_learn_mode(true);
-                    }
-                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
+        move |cmd| match cmd {
+            PwCommand::SetPluginParameter {
+                instance_id,
+                port_index,
+                value,
+            } => {
+                if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
+                    instance.borrow_mut().set_parameter(port_index, value);
+                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
                         instance_id,
                         port_index,
+                        value,
+                    }));
+                } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
+                    instance.borrow_mut().set_parameter(port_index, value);
+                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                        instance_id,
+                        port_index,
+                        value,
+                    }));
+                } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
+                    instance.borrow_mut().set_parameter(port_index, value);
+                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::ParameterChanged {
+                        instance_id,
+                        port_index,
+                        value,
                     }));
                 }
-                PwCommand::CancelMidiLearn => {
-                    *midi_learn_state.borrow_mut() = None;
-                    for filter in lv2_filters.borrow().values() {
-                        filter.set_learn_mode(false);
-                    }
-                    for filter in clap_filters.borrow().values() {
-                        filter.set_learn_mode(false);
-                    }
-                    for filter in vst3_filters.borrow().values() {
-                        filter.set_learn_mode(false);
-                    }
-                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnCancelled));
+            }
+            PwCommand::SetPluginBypass {
+                instance_id,
+                bypassed,
+            } => {
+                if let Some(instance) = lv2_instances.borrow().get(&instance_id) {
+                    instance.borrow_mut().bypassed = bypassed;
+                } else if let Some(instance) = clap_instances.borrow().get(&instance_id) {
+                    instance.borrow_mut().bypassed = bypassed;
+                } else if let Some(instance) = vst3_instances.borrow().get(&instance_id) {
+                    instance.borrow_mut().bypassed = bypassed;
                 }
-                PwCommand::AddMidiMapping(mapping) => {
-                    handle_add_midi_mapping(
-                        &midi_mapping_table,
-                        &lv2_instances,
-                        &lv2_filters,
-                        &clap_instances,
-                        &clap_filters,
-                        &vst3_instances,
-                        &vst3_filters,
-                        &event_tx,
-                        mapping,
-                    );
+            }
+            PwCommand::StartMidiLearn {
+                instance_id,
+                port_index,
+                label,
+                mode,
+            } => {
+                *midi_learn_state.borrow_mut() = Some(crate::midi::MidiLearnState {
+                    target: crate::midi::MidiCcTarget {
+                        instance_id,
+                        port_index,
+                    },
+                    label,
+                    mode,
+                });
+                if let Some(filter) = lv2_filters.borrow().get(&instance_id) {
+                    filter.set_learn_mode(true);
+                } else if let Some(filter) = clap_filters.borrow().get(&instance_id) {
+                    filter.set_learn_mode(true);
+                } else if let Some(filter) = vst3_filters.borrow().get(&instance_id) {
+                    filter.set_learn_mode(true);
                 }
-                PwCommand::RemoveMidiMapping(source) => {
-                    let removed = midi_mapping_table.borrow_mut().remove(&source);
-                    if removed.is_some() {
-                        rebuild_resolved_mappings(
-                            &midi_mapping_table,
-                            &lv2_instances,
-                            &lv2_filters,
-                            &clap_instances,
-                            &clap_filters,
-                            &vst3_instances,
-                            &vst3_filters,
-                        );
-                        let _ = event_tx.send(PwEvent::Plugin(
-                            PluginEvent::MidiMappingRemoved(source),
-                        ));
-                    }
+                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnStarted {
+                    instance_id,
+                    port_index,
+                }));
+            }
+            PwCommand::CancelMidiLearn => {
+                *midi_learn_state.borrow_mut() = None;
+                for filter in lv2_filters.borrow().values() {
+                    filter.set_learn_mode(false);
                 }
-                PwCommand::RemoveMidiMappingsForPlugin { instance_id } => {
-                    midi_mapping_table.borrow_mut().remove_by_instance(instance_id);
+                for filter in clap_filters.borrow().values() {
+                    filter.set_learn_mode(false);
+                }
+                for filter in vst3_filters.borrow().values() {
+                    filter.set_learn_mode(false);
+                }
+                let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiLearnCancelled));
+            }
+            PwCommand::AddMidiMapping(mapping) => {
+                handle_add_midi_mapping(
+                    &midi_mapping_table,
+                    &lv2_instances,
+                    &lv2_filters,
+                    &clap_instances,
+                    &clap_filters,
+                    &vst3_instances,
+                    &vst3_filters,
+                    &event_tx,
+                    mapping,
+                );
+            }
+            PwCommand::RemoveMidiMapping(source) => {
+                let removed = midi_mapping_table.borrow_mut().remove(&source);
+                if removed.is_some() {
                     rebuild_resolved_mappings(
                         &midi_mapping_table,
                         &lv2_instances,
@@ -411,66 +397,83 @@ fn run_pipewire_thread(
                         &vst3_instances,
                         &vst3_filters,
                     );
+                    let _ = event_tx.send(PwEvent::Plugin(PluginEvent::MidiMappingRemoved(source)));
                 }
-                PwCommand::RemoveMidiMappingsForDevice { device_name } => {
-                    midi_mapping_table.borrow_mut().remove_by_device(&device_name);
-                    rebuild_resolved_mappings(
-                        &midi_mapping_table,
-                        &lv2_instances,
-                        &lv2_filters,
-                        &clap_instances,
-                        &clap_filters,
-                        &vst3_instances,
-                        &vst3_filters,
-                    );
-                    log::info!(
-                        "Cleaned up MIDI mappings for removed device: {}",
-                        device_name,
-                    );
-                }
-                cmd => {
-                    let op = match cmd {
-                        PwCommand::Connect {
-                            output_port_id,
-                            input_port_id,
-                        } => InternalOp::Connect {
-                            output_port_id,
-                            input_port_id,
-                        },
-                        PwCommand::Disconnect { link_id } => InternalOp::Disconnect { link_id },
-                        PwCommand::AddPlugin {
-                            plugin_uri,
-                            instance_id,
-                            display_name,
-                            format,
-                            lv2_state,
-                        } => InternalOp::AddPlugin {
-                            plugin_uri,
-                            instance_id,
-                            display_name,
-                            format,
-                            lv2_state,
-                        },
-                        PwCommand::RemovePlugin { instance_id } => {
-                            InternalOp::RemovePlugin { instance_id }
-                        }
-                        PwCommand::OpenPluginUI { instance_id } => {
-                            InternalOp::OpenPluginUI { instance_id }
-                        }
-                        PwCommand::ClosePluginUI { instance_id } => {
-                            InternalOp::ClosePluginUI { instance_id }
-                        }
-                        PwCommand::SetPluginParameter { .. }
-                        | PwCommand::SetPluginBypass { .. }
-                        | PwCommand::StartMidiLearn { .. }
-                        | PwCommand::CancelMidiLearn
-                        | PwCommand::AddMidiMapping(..)
-                        | PwCommand::RemoveMidiMapping(..)
-                        | PwCommand::RemoveMidiMappingsForPlugin { .. }
-                        | PwCommand::RemoveMidiMappingsForDevice { .. } => unreachable!(),
-                    };
-                    pending_ops.borrow_mut().push(op);
-                }
+            }
+            PwCommand::RemoveMidiMappingsForPlugin { instance_id } => {
+                midi_mapping_table
+                    .borrow_mut()
+                    .remove_by_instance(instance_id);
+                rebuild_resolved_mappings(
+                    &midi_mapping_table,
+                    &lv2_instances,
+                    &lv2_filters,
+                    &clap_instances,
+                    &clap_filters,
+                    &vst3_instances,
+                    &vst3_filters,
+                );
+            }
+            PwCommand::RemoveMidiMappingsForDevice { device_name } => {
+                midi_mapping_table
+                    .borrow_mut()
+                    .remove_by_device(&device_name);
+                rebuild_resolved_mappings(
+                    &midi_mapping_table,
+                    &lv2_instances,
+                    &lv2_filters,
+                    &clap_instances,
+                    &clap_filters,
+                    &vst3_instances,
+                    &vst3_filters,
+                );
+                log::info!(
+                    "Cleaned up MIDI mappings for removed device: {}",
+                    device_name,
+                );
+            }
+            cmd => {
+                let op = match cmd {
+                    PwCommand::Connect {
+                        output_port_id,
+                        input_port_id,
+                    } => InternalOp::Connect {
+                        output_port_id,
+                        input_port_id,
+                    },
+                    PwCommand::Disconnect { link_id } => InternalOp::Disconnect { link_id },
+                    PwCommand::AddPlugin {
+                        plugin_uri,
+                        instance_id,
+                        display_name,
+                        format,
+                        lv2_state,
+                    } => InternalOp::AddPlugin {
+                        plugin_uri,
+                        instance_id,
+                        display_name,
+                        format,
+                        lv2_state,
+                    },
+                    PwCommand::RemovePlugin { instance_id } => {
+                        InternalOp::RemovePlugin { instance_id }
+                    }
+                    PwCommand::OpenPluginUI { instance_id } => {
+                        InternalOp::OpenPluginUI { instance_id }
+                    }
+                    PwCommand::ClosePluginUI { instance_id } => {
+                        InternalOp::ClosePluginUI { instance_id }
+                    }
+                    PwCommand::SetPluginParameter { .. }
+                    | PwCommand::SetPluginBypass { .. }
+                    | PwCommand::StartMidiLearn { .. }
+                    | PwCommand::CancelMidiLearn
+                    | PwCommand::AddMidiMapping(..)
+                    | PwCommand::RemoveMidiMapping(..)
+                    | PwCommand::RemoveMidiMappingsForPlugin { .. }
+                    | PwCommand::RemoveMidiMappingsForDevice { .. } => unreachable!(),
+                };
+                pending_ops.borrow_mut().push(op);
             }
         }
     });
@@ -602,10 +605,7 @@ fn run_pipewire_thread(
                                         instance_id
                                     );
                                     let _ = event_tx.send(PwEvent::Plugin(
-                                        PluginEvent::Lv2StateSaved {
-                                            instance_id,
-                                            state,
-                                        },
+                                        PluginEvent::Lv2StateSaved { instance_id, state },
                                     ));
                                 }
                             }
@@ -966,7 +966,8 @@ fn handle_add_lv2_plugin(
         if !safe {
             log::error!(
                 "LV2 plugin '{}' ({}) crashed during sandbox probe — skipping",
-                display_name, plugin_uri
+                display_name,
+                plugin_uri
             );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
@@ -1036,7 +1037,9 @@ fn handle_add_lv2_plugin(
             };
             log::error!(
                 "Plugin '{}' ({}) panicked during instantiation: {}",
-                display_name, plugin_uri, panic_msg
+                display_name,
+                plugin_uri,
+                panic_msg
             );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
@@ -1060,12 +1063,14 @@ fn handle_add_lv2_plugin(
 
     let instance_rc = std::rc::Rc::new(RefCell::new(lv2_instance));
 
-    let has_midi_in = plugin_info.ports.iter().any(|p| {
-        p.port_type == crate::plugin::types::PluginPortType::AtomInput
-    });
-    let has_midi_out = plugin_info.ports.iter().any(|p| {
-        p.port_type == crate::plugin::types::PluginPortType::AtomOutput
-    });
+    let has_midi_in = plugin_info
+        .ports
+        .iter()
+        .any(|p| p.port_type == crate::plugin::types::PluginPortType::AtomInput);
+    let has_midi_out = plugin_info
+        .ports
+        .iter()
+        .any(|p| p.port_type == crate::plugin::types::PluginPortType::AtomOutput);
 
     let filter_config = crate::lv2::filter::FilterConfig {
         instance_id,
@@ -1127,7 +1132,8 @@ fn handle_add_clap_plugin(
         if !safe {
             log::error!(
                 "CLAP plugin '{}' ({}) crashed during sandbox probe — skipping",
-                display_name, plugin_uri
+                display_name,
+                plugin_uri
             );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
@@ -1150,12 +1156,7 @@ fn handle_add_clap_plugin(
 
         let library_path = &clap_info.library_path;
         let clap_instance = unsafe {
-            crate::clap::host::ClapPluginInstance::new(
-                library_path,
-                &uri_owned,
-                &clap_info,
-                sr,
-            )
+            crate::clap::host::ClapPluginInstance::new(library_path, &uri_owned, &clap_info, sr)
         };
 
         match clap_instance {
@@ -1184,7 +1185,9 @@ fn handle_add_clap_plugin(
             };
             log::error!(
                 "CLAP plugin '{}' ({}) panicked during instantiation: {}",
-                display_name, plugin_uri, panic_msg
+                display_name,
+                plugin_uri,
+                panic_msg
             );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
@@ -1260,7 +1263,8 @@ fn handle_add_vst3_plugin(
         if !safe {
             log::error!(
                 "VST3 plugin '{}' ({}) crashed during sandbox probe — skipping",
-                display_name, plugin_uri
+                display_name,
+                plugin_uri
             );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
@@ -1283,12 +1287,7 @@ fn handle_add_vst3_plugin(
 
         let library_path = &vst3_info.library_path;
         let vst3_instance = unsafe {
-            crate::vst3::host::Vst3PluginInstance::new(
-                library_path,
-                &uri_owned,
-                &vst3_info,
-                sr,
-            )
+            crate::vst3::host::Vst3PluginInstance::new(library_path, &uri_owned, &vst3_info, sr)
         };
 
         match vst3_instance {
@@ -1317,7 +1316,9 @@ fn handle_add_vst3_plugin(
             };
             log::error!(
                 "VST3 plugin '{}' ({}) panicked during instantiation: {}",
-                display_name, plugin_uri, panic_msg
+                display_name,
+                plugin_uri,
+                panic_msg
             );
             let _ = event_tx.send(PwEvent::Plugin(PluginEvent::PluginError {
                 instance_id: Some(instance_id),
@@ -1416,7 +1417,9 @@ fn handle_open_plugin_ui(
     port_updates: crate::lv2::SharedPortUpdates,
     urid_mapper: Arc<crate::lv2::urid::UridMapper>,
     lv2_handle: *mut std::ffi::c_void,
-    extension_data_fn: Option<unsafe extern "C" fn(*const std::os::raw::c_char) -> *const std::ffi::c_void>,
+    extension_data_fn: Option<
+        unsafe extern "C" fn(*const std::os::raw::c_char) -> *const std::ffi::c_void,
+    >,
 ) {
     crate::lv2::ui::open_plugin_ui(
         plugin_uri,
@@ -1456,7 +1459,9 @@ fn create_link(
     if output_port.node_id == input_port.node_id {
         log::warn!(
             "Rejected self-loop: port {} and port {} belong to the same node {}",
-            output_port_id, input_port_id, output_port.node_id
+            output_port_id,
+            input_port_id,
+            output_port.node_id
         );
         return;
     }
@@ -1468,8 +1473,12 @@ fn create_link(
         if out_mt != in_mt {
             log::warn!(
                 "Rejected media type mismatch: port {} ({:?}, {:?}) -> port {} ({:?}, {:?})",
-                output_port_id, output_port.name, out_mt,
-                input_port_id, input_port.name, in_mt,
+                output_port_id,
+                output_port.name,
+                out_mt,
+                input_port_id,
+                input_port.name,
+                in_mt,
             );
             return;
         }
@@ -1477,8 +1486,12 @@ fn create_link(
 
     log::debug!(
         "Creating link: port {} ({:?}, {:?}) -> port {} ({:?}, {:?})",
-        output_port_id, output_port.name, output_port.media_type,
-        input_port_id, input_port.name, input_port.media_type,
+        output_port_id,
+        output_port.name,
+        output_port.media_type,
+        input_port_id,
+        input_port.name,
+        input_port.media_type,
     );
 
     let props = pipewire::properties::properties! {
@@ -1510,10 +1523,7 @@ fn handle_add_midi_mapping(
     event_tx: &Sender<PwEvent>,
     mapping: crate::midi::MidiCcMapping,
 ) {
-    let existing = midi_mapping_table
-        .borrow()
-        .get(&mapping.source)
-        .cloned();
+    let existing = midi_mapping_table.borrow().get(&mapping.source).cloned();
 
     if let Some(ref existing_mapping) = existing {
         if existing_mapping.target == mapping.target {

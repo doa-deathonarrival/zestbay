@@ -21,6 +21,16 @@ Item {
     property real dragOffsetX: 0
     property real dragOffsetY: 0
 
+    // In-hand placement: when >= 0, this node follows the cursor until the
+    // user left-clicks to drop it (or Escape to drop in place). Used when a
+    // newly added plugin can't find a free spot near the add-point.
+    property int placingNodeId: -1
+
+    // Nodes that appeared without any links yet, placed provisionally near the
+    // cluster. Once a patchbay rule connects them, they get repositioned next to
+    // the node that picked them up. Map of nodeId -> true.
+    property var awaitingLinkPlacement: ({})
+
     property int connectFromPortId: -1
     property string connectFromDir: ""
     property real connectMouseX: 0
@@ -199,37 +209,152 @@ Item {
 
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
-            if (!(n.id in nodePositions)) {
-                var key = n.layoutKey || ""
-                var restoredFromLayout = false
-                if (key && savedLayout[key]) {
-                    var saved = savedLayout[key]
-                    nodePositions[n.id] = { x: saved[0], y: saved[1] }
-                    restoredFromLayout = true
-                } else if (n.type === "Plugin" && pendingPluginPosition) {
-                    nodePositions[n.id] = { x: pendingPluginPosition.x, y: pendingPluginPosition.y }
-                    pendingPluginPosition = null
+            if (n.id in nodePositions) continue
+            var key = n.layoutKey || ""
+
+            if (key && savedLayout[key]) {
+                // Known position from a previous session/placement. Restore it
+                // exactly and never auto-move it — a device toggling off/on (new
+                // PipeWire id, same layoutKey) must reappear where the user left it.
+                var saved = savedLayout[key]
+                nodePositions[n.id] = { x: saved[0], y: saved[1] }
+            } else if (n.type === "Plugin" && pendingPluginPosition) {
+                // User-added plugin: try to drop it on a free spot near the
+                // add-point. If there's no room nearby, place it "in hand" so the
+                // user can position it themselves.
+                var anchor = pendingPluginPosition
+                pendingPluginPosition = null
+                nodePositions[n.id] = { x: anchor.x, y: anchor.y }
+                var spot = findFreeSpot(n, anchor.x, anchor.y, true)
+                if (spot) {
+                    nodePositions[n.id] = spot
                     persistLayout()
                 } else {
-                    nodePositions[n.id] = { x: 0, y: 0 }
-                    autoPlaceNewNode(n.id)
+                    startPlacing(n.id)
                 }
-                if (n.type === "Plugin" && key && !pinnedNodes[key]) {
-                    pinnedNodes[key] = true
-                    pinnedNodes = pinnedNodes
-                    persistPinned()
+            } else {
+                // Auto-appearing node (hardware device, stream). If a patchbay
+                // rule has already linked it, drop it next to the node that
+                // picked it up. Otherwise place it provisionally — near the
+                // default node if one is set (that's where a ruleless node will
+                // connect), else near the cluster — and remember it so the
+                // second pass can reposition it once its links show up.
+                if (!placeNearPeer(n)) {
+                    var pa = provisionalAnchor(n)
+                    nodePositions[n.id] = pa
+                    var spot2 = findFreeSpot(n, pa.x, pa.y, false)
+                    if (spot2) nodePositions[n.id] = spot2
+                    persistLayout()
+                    if (!nodeIsPinned(n)) {
+                        awaitingLinkPlacement[n.id] = true
+                        awaitingLinkPlacement = awaitingLinkPlacement
+                    }
                 }
-                // Don't resolve overlap for pinned nodes restored from saved layout —
-                // the user placed them there intentionally.
-                var isPinned = key && pinnedNodes[key]
-                if (!(isPinned && restoredFromLayout)) {
-                    resolveNodeOverlap(n)
-                }
+            }
+
+            // Auto-pin plugins so their manual placement sticks across restarts.
+            if (n.type === "Plugin" && key && !pinnedNodes[key]) {
+                pinnedNodes[key] = true
+                pinnedNodes = pinnedNodes
+                persistPinned()
             }
         }
 
+        // Second placement pass: reposition nodes that were waiting for a rule
+        // to connect them, now that their links may have arrived.
+        var stillAwaiting = {}
+        for (var aid in awaitingLinkPlacement) {
+            var anode = findNodeData(parseInt(aid))
+            if (!anode) continue            // node vanished — forget it
+            if (nodeIsPinned(anode)) continue  // user pinned it — honor the pin
+            if (!placeNearPeer(anode)) {
+                stillAwaiting[aid] = true   // no peer yet, keep waiting
+            }
+        }
+        awaitingLinkPlacement = stillAwaiting
+
         canvas.requestPaint()
         repaintTimer.restart()
+    }
+
+    // A node is pinned if its layout key is in the pinned set. Pinned nodes are
+    // never auto-moved — pins are honored above all else.
+    function nodeIsPinned(node) {
+        return !!(node && node.layoutKey && pinnedNodes[node.layoutKey])
+    }
+
+    // If `node` is linked to an already-positioned peer, place it immediately
+    // next to that peer (downstream → right of peer, upstream → left) on the
+    // nearest free spot. Returns true if placed. Pinned nodes are never moved.
+    function placeNearPeer(node) {
+        if (nodeIsPinned(node)) return false
+        var nodeId = node.id
+        for (var li = 0; li < links.length; li++) {
+            var link = links[li]
+            var peerId = -1
+            var nodeFeedsPeer = false  // node output → peer input (node sits left)
+            if (link.outputNodeId === nodeId && (link.inputNodeId in nodePositions) && link.inputNodeId !== nodeId) {
+                peerId = link.inputNodeId
+                nodeFeedsPeer = true
+            } else if (link.inputNodeId === nodeId && (link.outputNodeId in nodePositions) && link.outputNodeId !== nodeId) {
+                peerId = link.outputNodeId
+                nodeFeedsPeer = false
+            }
+            if (peerId < 0) continue
+            var peerNode = findNodeData(peerId)
+            if (!peerNode || !nodePositions[peerId]) continue
+
+            var anchor = adjacentAnchor(node, peerNode, nodeFeedsPeer)
+            var spot = findFreeSpot(node, anchor.x, anchor.y, false)
+            nodePositions[nodeId] = spot || anchor
+            persistLayout()
+            return true
+        }
+        return false
+    }
+
+    // Top-left anchor placing `node` directly beside `peer`: to the peer's left
+    // when the node feeds the peer (signal flows node → peer), otherwise to its
+    // right. Same vertical level as the peer.
+    function adjacentAnchor(node, peer, nodeFeedsPeer) {
+        var peerPos = nodePositions[peer.id]
+        var w = getNodeWidth(node.id) || minNodeWidth
+        var peerW = getNodeWidth(peer.id) || minNodeWidth
+        var spacing = 40
+        var anchorX = nodeFeedsPeer ? (peerPos.x - w - spacing)
+                                    : (peerPos.x + peerW + spacing)
+        return { x: anchorX, y: peerPos.y }
+    }
+
+    function findNodeByLayoutKey(key) {
+        if (!key) return null
+        for (var i = 0; i < nodes.length; i++) {
+            if (nodes[i].layoutKey === key) return nodes[i]
+        }
+        return null
+    }
+
+    // Position in the signal flow, used to guess which side of a peer a node
+    // belongs on before any links exist (sources left → sinks right).
+    function flowRank(type) {
+        if (type === "Source") return 0
+        if (type === "StreamOutput") return 1
+        if (type === "StreamInput") return 3
+        if (type === "Sink" || type === "Duplex") return 4
+        return 2  // Plugin / Unknown — middle
+    }
+
+    // Where to drop a freshly-appeared node before its links exist: beside the
+    // default node if one is set (a ruleless node connects there), otherwise
+    // near the existing cluster. The second pass corrects this once real links
+    // arrive; if the node never connects, it simply stays here.
+    function provisionalAnchor(node) {
+        var defNode = findNodeByLayoutKey(defaultNodeKey)
+        if (defNode && defNode.id !== node.id && nodePositions[defNode.id]) {
+            var nodeFeedsDefault = flowRank(node.type) <= flowRank(defNode.type)
+            return adjacentAnchor(node, defNode, nodeFeedsDefault)
+        }
+        return clusterAnchor(node)
     }
 
     function findConnectedPeerPosition(nodeId) {
@@ -728,37 +853,90 @@ Item {
         }
     }
 
-    function autoPlaceNewNode(nodeId) {
-        var uniqueKeys = buildUniqueLayoutKeys()
-        var pinned = {}
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var n = nodes[ni]
-            var key = uniqueKeys[n.id] || ""
-            if (key && n.id !== nodeId && nodePositions[n.id]) {
-                var pos = nodePositions[n.id]
-                pinned[key] = [pos.x, pos.y]
+    // Does a node of size w×h placed at (x, y) clear every other visible node,
+    // keeping at least `spacing` px of gap? `ignoreId` is excluded (the node
+    // being placed).
+    function spotIsFree(x, y, w, h, ignoreId, spacing) {
+        for (var oi = 0; oi < nodes.length; oi++) {
+            var other = nodes[oi]
+            if (other.id === ignoreId) continue
+            if (other.layoutKey && hiddenNodes[other.layoutKey]) continue
+            var opos = nodePositions[other.id]
+            if (!opos) continue
+            var ow = getNodeWidth(other.id) || minNodeWidth
+            var oh = calculateNodeHeight(other)
+            if (x < opos.x + ow + spacing && x + w + spacing > opos.x &&
+                y < opos.y + oh + spacing && y + h + spacing > opos.y) {
+                return false
             }
         }
-        var sizesJson = JSON.stringify(collectNodeSizes())
-        var pinnedJson = JSON.stringify(pinned)
-        var resultJson = controller.auto_layout(sizesJson, pinnedJson)
-        try {
-            var positions = JSON.parse(resultJson)
-            var uniqueKeys2 = buildUniqueLayoutKeys()
-            for (var ni2 = 0; ni2 < nodes.length; ni2++) {
-                var n2 = nodes[ni2]
-                var key2 = uniqueKeys2[n2.id] || ""
-                if (n2.id === nodeId && key2 && positions[key2]) {
-                    var pos2 = positions[key2]
-                    nodePositions[n2.id] = { x: pos2[0], y: pos2[1] }
-                    if (savedLayout) savedLayout[key2] = [pos2[0], pos2[1]]
+        return true
+    }
+
+    // Find the nearest free spot for `node` starting at (anchorX, anchorY),
+    // searching outward in a grid spiral. When `bounded` is true the search
+    // gives up after a few rings (caller falls back to in-hand placement);
+    // when false it searches far enough that a spot is always found.
+    function findFreeSpot(node, anchorX, anchorY, bounded) {
+        var w = getNodeWidth(node.id) || minNodeWidth
+        var h = calculateNodeHeight(node)
+        var spacing = 20
+        var stepX = w + spacing
+        var stepY = h + spacing
+
+        if (spotIsFree(anchorX, anchorY, w, h, node.id, spacing)) {
+            return { x: anchorX, y: anchorY }
+        }
+
+        var maxRings = bounded ? 4 : 80
+        for (var ring = 1; ring <= maxRings; ring++) {
+            for (var dx = -ring; dx <= ring; dx++) {
+                for (var dy = -ring; dy <= ring; dy++) {
+                    // Only test the perimeter of the current ring.
+                    if (Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue
+                    var cx = anchorX + dx * stepX
+                    var cy = anchorY + dy * stepY
+                    if (spotIsFree(cx, cy, w, h, node.id, spacing)) {
+                        return { x: cx, y: cy }
+                    }
                 }
             }
-            canvas.requestPaint()
-            persistLayout()
-        } catch(e) {
-            console.log("Auto place new node failed:", e)
         }
+        return null
+    }
+
+    // Anchor point for auto-appearing nodes: the centre of the existing
+    // visible cluster (or a default origin if the canvas is empty).
+    function clusterAnchor(node) {
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+        var count = 0
+        for (var i = 0; i < nodes.length; i++) {
+            var o = nodes[i]
+            if (o.id === node.id) continue
+            if (o.layoutKey && hiddenNodes[o.layoutKey]) continue
+            var p = nodePositions[o.id]
+            if (!p) continue
+            minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+            maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+            count++
+        }
+        if (count === 0) return { x: 50, y: 50 }
+        return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
+    }
+
+    // Begin in-hand placement: the node tracks the cursor until dropped.
+    function startPlacing(nodeId) {
+        placingNodeId = nodeId
+        activeSnapLines = []
+        canvas.requestPaint()
+    }
+
+    // Finish in-hand placement, leaving the node wherever it currently sits.
+    function finishPlacing() {
+        if (placingNodeId < 0) return
+        placingNodeId = -1
+        persistLayout()
+        canvas.requestPaint()
     }
 
     function isNodeBypassed(node) {
@@ -1289,7 +1467,11 @@ Item {
             event.accepted = true
         }
         if (event.key === Qt.Key_Escape) {
-            clearSelection()
+            if (placingNodeId >= 0) {
+                finishPlacing()
+            } else {
+                clearSelection()
+            }
             event.accepted = true
         }
     }
@@ -1307,6 +1489,12 @@ Item {
             graphView.forceActiveFocus()
             lastX = mouse.x
             lastY = mouse.y
+
+            // In-hand placement: a click drops the node where it currently sits.
+            if (placingNodeId >= 0) {
+                finishPlacing()
+                return
+            }
 
             if (mouse.button === Qt.MiddleButton) {
                 return
@@ -1436,6 +1624,17 @@ Item {
         }
 
         onPositionChanged: (mouse) => {
+            // In-hand placement: keep the node centred under the cursor.
+            if (placingNodeId >= 0) {
+                var pc = toCanvas(mouse.x, mouse.y)
+                var pn = findNodeData(placingNodeId)
+                var pw = (getNodeWidth(placingNodeId) || minNodeWidth)
+                var ph = pn ? calculateNodeHeight(pn) : 80
+                nodePositions[placingNodeId] = { x: pc.x - pw / 2, y: pc.y - ph / 2 }
+                canvas.requestPaint()
+                return
+            }
+
             if (mouse.buttons & Qt.MiddleButton) {
                 panX += mouse.x - lastX
                 panY += mouse.y - lastY
