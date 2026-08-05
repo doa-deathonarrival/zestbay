@@ -31,6 +31,11 @@ Item {
     // the node that picked them up. Map of nodeId -> true.
     property var awaitingLinkPlacement: ({})
 
+    // Nodes positioned automatically (not by the user, not from a saved
+    // layout). Only these may be moved by the backwards-link correction pass;
+    // a user drag removes the node from this set. Map of nodeId -> true.
+    property var autoPlaced: ({})
+
     property int connectFromPortId: -1
     property string connectFromDir: ""
     property real connectMouseX: 0
@@ -207,6 +212,23 @@ Item {
         }
         portMediaTypes = newPortMedia
 
+        // Drop per-id state for nodes that no longer exist. PipeWire recycles
+        // object ids (and bridge sub-node ids can change), so a stale entry
+        // would hand a brand-new node some old node's position and bypass the
+        // savedLayout restore below — the pin/saved position would be ignored
+        // and then overwritten by the next persistLayout().
+        var liveIds = {}
+        for (var lv = 0; lv < nodes.length; lv++) liveIds[nodes[lv].id] = true
+        for (var stale in nodePositions) {
+            if (!liveIds[stale]) delete nodePositions[stale]
+        }
+        for (var staleA in awaitingLinkPlacement) {
+            if (!liveIds[staleA]) delete awaitingLinkPlacement[staleA]
+        }
+        for (var staleP in autoPlaced) {
+            if (!liveIds[staleP]) delete autoPlaced[staleP]
+        }
+
         for (var ni = 0; ni < nodes.length; ni++) {
             var n = nodes[ni]
             if (n.id in nodePositions) continue
@@ -239,6 +261,7 @@ Item {
                 // default node if one is set (that's where a ruleless node will
                 // connect), else near the cluster — and remember it so the
                 // second pass can reposition it once its links show up.
+                autoPlaced[n.id] = true
                 if (!placeNearPeer(n)) {
                     var pa = provisionalAnchor(n)
                     nodePositions[n.id] = pa
@@ -273,8 +296,40 @@ Item {
         }
         awaitingLinkPlacement = stillAwaiting
 
+        // Third pass: fix auto-placed nodes whose links flow backwards (the
+        // line's input end sits left of its output end, i.e. the connection
+        // angle points right-to-left). One-shot per node, and only for nodes
+        // the user never touched — pinned or hand-placed nodes are sacred.
+        for (var bid in autoPlaced) {
+            if (awaitingLinkPlacement[bid]) continue
+            var bnode = findNodeData(parseInt(bid))
+            if (!bnode || nodeIsPinned(bnode)) continue
+            if (nodeHasBackwardLink(parseInt(bid))) {
+                delete autoPlaced[bid]
+                placeNearPeer(bnode)
+            }
+        }
+
         canvas.requestPaint()
         repaintTimer.restart()
+    }
+
+    // True if any link touching `nodeId` runs right-to-left: the input end
+    // (peer's left edge) is left of the output end (source's right edge).
+    // Equivalent to the link line's angle atan2(dy, dx) being outside ±90°.
+    // A small tolerance ignores near-vertical links between stacked nodes.
+    function nodeHasBackwardLink(nodeId) {
+        for (var li = 0; li < links.length; li++) {
+            var l = links[li]
+            if (l.outputNodeId !== nodeId && l.inputNodeId !== nodeId) continue
+            if (l.outputNodeId === l.inputNodeId) continue
+            var fromPos = nodePositions[l.outputNodeId]
+            var toPos = nodePositions[l.inputNodeId]
+            if (!fromPos || !toPos) continue
+            var outX = fromPos.x + (getNodeWidth(l.outputNodeId) || minNodeWidth)
+            if (toPos.x < outX - 20) return true
+        }
+        return false
     }
 
     // A node is pinned if its layout key is in the pinned set. Pinned nodes are
@@ -934,6 +989,7 @@ Item {
     // Finish in-hand placement, leaving the node wherever it currently sits.
     function finishPlacing() {
         if (placingNodeId < 0) return
+        delete autoPlaced[placingNodeId]
         placingNodeId = -1
         persistLayout()
         canvas.requestPaint()
@@ -1577,6 +1633,9 @@ Item {
 
                     if (nodeIsSelected) {
                         groupDragging = true
+                        for (var agid in selectedNodes) {
+                            if (selectedNodes[agid]) delete autoPlaced[agid]
+                        }
                         var cg = toCanvas(mouse.x, mouse.y)
                         groupDragLastX = cg.x
                         groupDragLastY = cg.y
@@ -1584,6 +1643,7 @@ Item {
                         selectedNodes = {}
                         selectedLinks = {}
                         dragNodeId = nodeIdDrag
+                        delete autoPlaced[nodeIdDrag]
                         var c = toCanvas(mouse.x, mouse.y)
                         var pos = nodePositions[nodeIdDrag]
                         dragOffsetX = c.x - pos.x
