@@ -303,11 +303,12 @@ impl BridgeSplitState {
         }
     }
 
-    fn clear(&mut self) {
-        self.virtual_to_real.clear();
-        self.real_to_virtual.clear();
+    /// Rebuild only the port mappings. Node id mappings survive for the whole
+    /// session: a device must keep its virtual id across refreshes, otherwise a
+    /// reconnecting device inherits another node's id — and with it, that
+    /// node's on-screen position — instead of its own saved one.
+    fn clear_ports(&mut self) {
         self.port_to_virtual.clear();
-        self.next_virtual_id = Self::VIRTUAL_ID_BASE;
     }
 
     fn get_or_create_virtual_id(&mut self, real_node_id: u32, group: &str) -> u32 {
@@ -1234,8 +1235,8 @@ impl qobject::AppController {
                 nodes.iter().filter(|n| n.ready).count()
             );
 
-            // Rebuild bridge split state each refresh
-            self.as_mut().rust_mut().bridge_split.clear();
+            // Rebuild port mappings each refresh; virtual node ids stay stable
+            self.as_mut().rust_mut().bridge_split.clear_ports();
 
             let mut json_nodes: Vec<serde_json::Value> = Vec::new();
 
